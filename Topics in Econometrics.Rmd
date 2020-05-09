@@ -1,0 +1,236 @@
+---
+title: "Topics in Econometrics"
+author: "Ji Hun Lee"
+date: "May 5, 2020"
+output: html_document
+---
+
+Load the libraries used in this analysis.
+```{r}
+library(jtools)
+library(foreach)
+library(tidyverse)
+library(stargazer)
+
+```
+
+
+
+# Regression in high dimensions: effect of including irrelevant ariables on Standard Errors and Coefficient Estimate
+
+Let's say we have sample size of 102 rows, the true DGP is only one variable x1, 
+
+If we add irrelevant variables to the true DGP, let us see what happens to the precision of estimates. 
+
+we make sure Y is created as Y ~ X + e only instea of Y ~ X1 + x2 + x3 +... + Xp + e 
+
+```{r}
+M <- 10000
+N <- 102
+beta <- c()
+var_beta <- c()
+for (i in 1:M) {
+  x1 <- c()
+  e <- c()
+  y <- c()
+  for (j in 1:N) {
+    x1[j] <- rnorm(1,0,1)
+    e[j] <- rnorm(1,0,1)
+    y[j] <- x1[j] + e[j]
+  }
+  summa <- summary(lm(y~x1))$coefficients
+  beta[i] <- summa[2,1]
+  
+}
+# true variance
+var(beta)
+```
+Linear regression is unable to extract patterns.
+
+This is the curse of dimensionality effect. When feature space has many dimensions, it requires exponentially more data points for model to extract pattern. We see tha the precision decreases as we include more and more irrelevant predictors.
+
+This is a caveat for lienar regression on big data matrix and you dont do feature selection. t
+
+```{r}
+# takes the number of rows, n, and the number of predictors, p
+# and outputs  a real number coefficient estimate on X1 as
+computeCoefficient <- function(n,p) {
+  X <- matrix(rnorm(n*p), nrow=n, ncol=p)
+  Y <- X[,1]+rnorm(n)
+  coef <- solve(t(X)%*%X)%*%t(X)%*%Y 
+  return(coef[1])
+}
+computeCoefficient(102,13)
+```
+```{r}
+# outputs a vector of real coefficients of size k 
+simulateCoefficient <- function(n,p,m){
+  result <- c()
+  for (i in 1:m) {
+    result[i] <- computeCoefficient(n,p)
+  }
+  return(result)
+}
+coefficients <- simulateCoefficient(102,99,10000)
+```
+
+We configure the simulation settings first, and then compute the simulated variance for each configuration.
+```{r}
+model = list(
+  n=102,
+  plist=c(1,2,5,10,90,95,99),
+  m=10000
+)
+foreach(pp=model$plist, .combine='rbind') %do% {
+  coefs= simulateCoefficient(model$n, pp, model$m)
+  data.frame(n=pp, var=sqrt(var(coefs)))
+}
+```
+Wwe can see thtat the cost of including additional regressors is small when we have relativvevly small number of regressors. However, the cost is very large when we have large number of regressors.
+
+_____________________________________________________________________________________________________________________________________________
+# II. OLS and PRoblem of Finding the Best Subset of Variables When You Have Large P
+
+Following is the dataset from Sala-i-Martin (1997). Compared to the raw data, we have dropped all the countries with at least one missing variables, and the variable AGE is missing from the dataset. The variable GROWTH is given as gamma in the dataset.
+
+```{r}
+df <- read.csv('C:/Users/jihun/Downloads/topics_in_econometrics/salaimartin1997.csv')
+df <- within(df, gamma <- 100*gamma)
+str(df)
+```
+
+Regress the growth rate on GDPSH60, LIFE060, and P60.
+```{r}
+stargazer(lm(gamma ~ GDPSH60 + LIFEE060 + P60, data=df), type='text')
+```
+The coefficients are -1.6, 0.13, and 0.9 respectively. The signs make sense. Richer countries are harder to grow, and it is harder for the countries to grow with higher life expectancy and higher education attainment, holding all other factors fixed.
+
+Regress gamma on all other covariates. What is the effect of too many predictors and not enough sample size? Changed estimation and no precision on the estimates.
+```{r}
+summ(lm(gamma ~ . - code - country, data=df))
+```
+The coefficients on the growth rate, life expectancy, and educational attainment are now 0.28, -0.45, and 30.6, respectively. The signs have changed for the coefficients GDPSH60 and LIFEE060. The scale of coefficient on P60 has also been greatly increased. 
+
+
+Now run regressions with all the possible choices of adding two more variables, and will choose the model with the largest R-squared.
+
+The model selection method becomes combinatorically computationally expensive.
+```{r}
+# create a matrix that contains all possible combinations of the variables
+selectMat <- data.frame(V1=4, V2=5, V3=6, expand.grid(rep(list(7:ncol(df)),2)))
+selectMat <- subset(selectMat, Var1 < Var2)
+for (k in 1:ncol(selectMat)) {
+  selectMat[,k] <- colnames(df)[selectMat[,k]]
+}
+# prepare space that stores the first three coefficients and the R-squared
+results <- matrix(0, nrow=nrow(selectMat), ncol=4)
+colnames(results) = c(colnames(df[4:6]), 'R2')
+# run linear regression for each combination
+for (j in 1:nrow(selectMat)) {
+  selectFormula <- paste('gamma ~ ', paste(selectMat[j,], collapse = " + "), sep = ' ')
+  resultLM <- lm(formula = selectFormula, data=df)
+  results[j, 1:3] <- resultLM$coef[2:4]
+  results[j, 4] <- summary(resultLM)$r.squared
+}
+# obtain coefficients with highest R squared
+print(results[which.max(results[,4]),])
+print(selectMat[which.max(results[,4]),])
+```
+The resulting choice is YrsOpen and PRIEXP70. The coefficients on the main regressors has the same sign. 
+
+__________________________________________________________________________________________________________________________________________
+# Effect of High Dimensionality on Eigenvalue Decompsoition
+
+For each N = 100, 200, 500, 1000, we will compute the smallest eigenvalue of the covariance matrix X'X assuming X with dimensionality of p = 90 is iid drawn from N(0, S) where S is symmetric matrix with diagonal 1's and off-diagonal element q.
+
+We will vary p, q, and see how it changes the smallest eigenvalues. 
+
+```{r}
+simulateEquicorrelatedNormals <- function(N, p, rho) {
+  # prepare covariane matrix
+  varMat <- matrix(rho, nrow=p, ncol=p)
+  varMat[row(varMat) == col(varMat)] = 1
+  
+  # compute Cholesky decomposition and transpose it to get a lower triangular matrix
+  varChol <- t(chol(varMat))
+  
+  # simulate N uncorrelated standard normals of p dimension
+  deviations <- matrix(rnorm(N*p), nrow=p, ncol=N)
+  
+  # multiply cholesky lower triangular matrix to generate equicorrelated normals
+  draws <- varChol %*% deviations
+  
+  # return draws in a N*p matrix
+  return(t(draws))
+}
+simulateEquicorrelatedNormals(N=100, p=90, rho=0)[1:5,1:5]
+```
+
+```{r}
+simulateMinimumEigenvalues <- function(S, N, p, rho) {
+  # prepare space for minimum eigenvalues
+  minEig <- rep(0, S)
+  
+  # simulate S eigenvalues
+  for (s in 1:S) {
+    X <- simulateEquicorrelatedNormals(N, p, rho)
+    XX <- t(X) %*% X
+    eigs <- eigen(XX, symmetric=T, only.values=T)$values
+    minEig[s] <- min(eigs)
+  }
+  
+  # return eigenvalue vector
+  return(minEig)
+}
+simulateMinimumEigenvalues(S=10, N=100, p=90, rho=0)
+
+```
+
+Wraper function for generating average minimum eigenvalues for all combinations of N, p, and rho
+```{r}
+generateTableOfMinimumEigenvalues <- function(model) {
+  K <- length(model$N)
+  
+  foreach(rho=model$rho, .combine='rbind') %do% {
+    foreach(k=1:K, .combine='rbind') %do% {
+      eigs <- simulateMinimumEigenvalues(model$S, model$N[k], model$p[k], rho)
+      data.frame(N = model$N[k], p=model$p[k], rho=rho, minEig = mean(eigs))
+    }
+  }
+}
+```
+
+We specify the model specifications. Try dufferent values of N = 100, 200, 500, 1000 with 90 variables and 0 correlation.
+```{r}
+model <- list(
+  N <- c(100, 200, 500, 1000),
+  rho <- c(0, 0.5, 0.9),
+  S <- 10
+)
+```
+
+We try correlation of 0.5 and 0.9. We see that the minimum eigenvalue increases fast with the increase in N. The rate of increase is higher when there is small correlation between the regressors, which is true for all the subsequent exercises.
+```{r}
+model <- within(model, p <- rep(90, length(N)))
+generateTableOfMinimumEigenvalues(model)
+```
+
+Now we let p grow with N, namely p = 0.9N. We see that the minimum eigenvalue increases very slowly.
+```{r}
+model <- within(model, p <- as.integer(0.9*N))
+generateTableOfMinimumEigenvalues(model)
+```
+
+Now we let p = 19.55ln(N). We see that the minimum eigenvalue increases fast, which is comparable to the speed of increases earlier.
+```{r}
+model <- within(model, p <- as.integer(19.55*log(N)))
+generateTableOfMinimumEigenvalues(model)
+
+```
+
+
+
+
+
+
+
